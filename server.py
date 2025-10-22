@@ -18,7 +18,7 @@ from fastapi.responses import Response, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 import websockets
 from google import genai
-from google.genai.types import LiveConnectConfig, PrebuiltVoiceConfig, VoiceConfig, SpeechConfig
+from google.genai.types import LiveConnectConfig, PrebuiltVoiceConfig, VoiceConfig, SpeechConfig, Blob, GenerationConfig
 import numpy as np
 from pydub import AudioSegment
 from io import BytesIO
@@ -168,10 +168,21 @@ class AudioResampler:
     def resample_audio(audio_data: bytes, from_rate: int, to_rate: int, channels: int = 1) -> bytes:
         """Resample audio from one rate to another"""
         try:
+            # Check if data length is valid (must be multiple of sample_width * channels)
+            sample_width = 2  # 16-bit = 2 bytes
+            frame_size = sample_width * channels
+
+            # Pad audio data if necessary
+            remainder = len(audio_data) % frame_size
+            if remainder != 0:
+                padding_needed = frame_size - remainder
+                audio_data = audio_data + (b'\x00' * padding_needed)
+                logger.debug(f"Padded audio data by {padding_needed} bytes")
+
             # Convert bytes to AudioSegment
             audio = AudioSegment(
                 data=audio_data,
-                sample_width=2,  # 16-bit = 2 bytes
+                sample_width=sample_width,
                 frame_rate=from_rate,
                 channels=channels
             )
@@ -206,25 +217,28 @@ class ExotelGeminiSession:
         try:
             logger.info(f"Starting Gemini session for call {self.call_sid}")
 
-            # Configure Gemini Live session with simple config
+            # Get system prompt
+            system_prompt = _create_ipl_assistant_prompt()
+
+            # Create config with system instruction (works with new SDK!)
             config = LiveConnectConfig(
-                response_modalities=["AUDIO"]
+                response_modalities=["AUDIO"],
+                system_instruction=system_prompt  # Pass system prompt in config, NOT as separate message
             )
 
-            # Connect to Gemini
+            logger.info(f"[{self.call_sid}] Connecting to Gemini Live API...")
+
+            # Connect to Gemini with the Live model
             async with client.aio.live.connect(
-                model="models/gemini-2.0-flash-exp",
+                model="gemini-2.0-flash-live-001",
                 config=config
             ) as session:
                 self.gemini_session = session
-                logger.info(f"✅ Gemini session established for call {self.call_sid}")
-
-                # Send system instruction as initial message
-                system_prompt = _create_ipl_assistant_prompt()
-                await session.send(system_prompt, end_of_turn=True)
-                logger.debug(f"[{self.call_sid}] System instruction sent to Gemini")
+                logger.info(f"✅ Gemini session connected for call {self.call_sid}")
+                logger.info(f"[{self.call_sid}] System prompt configured in session")
 
                 # Run bidirectional audio streaming
+                # Do NOT send system prompt separately - it's in the config!
                 await asyncio.gather(
                     self._send_audio_to_gemini(),
                     self._receive_audio_from_gemini(),
@@ -232,7 +246,7 @@ class ExotelGeminiSession:
                 )
 
         except Exception as e:
-            logger.error(f"Error in Gemini session: {e}")
+            logger.error(f"Error in Gemini session: {e}", exc_info=True)
         finally:
             self.is_active = False
             logger.info(f"Gemini session ended for call {self.call_sid}")
@@ -266,8 +280,14 @@ class ExotelGeminiSession:
 
                 logger.debug(f"[{self.call_sid}] 🔄 Resampled to 16kHz: {len(gemini_audio)} bytes")
 
-                # Send to Gemini
-                await self.gemini_session.send(input=gemini_audio, end_of_turn=False)
+                # Create audio blob
+                audio_blob = Blob(
+                    mime_type="audio/pcm",
+                    data=gemini_audio
+                )
+
+                # Send to Gemini using send_realtime_input (the correct method for multi-turn)
+                await self.gemini_session.send_realtime_input(audio=audio_blob)
                 audio_chunks_sent += 1
 
                 if audio_chunks_sent % 10 == 0:  # Log every 10 chunks
@@ -284,62 +304,82 @@ class ExotelGeminiSession:
         """Receive audio from Gemini and send to Exotel (24kHz → 8kHz)"""
         audio_chunks_received = 0
         text_responses = []
+        turn_count = 0
 
         try:
             logger.debug(f"[{self.call_sid}] Starting audio receive loop from Gemini")
 
-            async for response in self.gemini_session.receive():
-                logger.debug(f"[{self.call_sid}] 📨 Received response from Gemini")
+            # Keep receiving while session is active - the receive() iterator can complete after processing
+            while self.is_active and self.gemini_session:
+                try:
+                    async for response in self.gemini_session.receive():
+                        if not self.is_active:
+                            break
 
-                # Handle audio output
-                if response.data:
-                    logger.debug(f"[{self.call_sid}] 🔊 Audio data received from Gemini")
+                        logger.debug(f"[{self.call_sid}] 📨 Received response from Gemini")
 
-                    # Decode base64 audio from Gemini (24kHz PCM)
-                    gemini_audio = base64.b64decode(response.data)
-                    logger.debug(f"[{self.call_sid}] Decoded audio: {len(gemini_audio)} bytes at 24kHz")
+                        # Check for audio and text in server_content.model_turn.parts
+                        if hasattr(response, 'server_content') and response.server_content:
+                            if hasattr(response.server_content, 'model_turn') and response.server_content.model_turn:
+                                model_turn = response.server_content.model_turn
+                                if hasattr(model_turn, 'parts') and model_turn.parts:
+                                    for part in model_turn.parts:
+                                        # Handle audio data in inline_data
+                                        if hasattr(part, 'inline_data') and part.inline_data:
+                                            logger.debug(f"[{self.call_sid}] 🔊 Audio data found in inline_data")
 
-                    # Resample 24kHz → 8kHz for Exotel
-                    exotel_audio = self.resampler.resample_audio(
-                        gemini_audio,
-                        from_rate=GEMINI_OUTPUT_RATE,
-                        to_rate=EXOTEL_SAMPLE_RATE
-                    )
+                                            # Get audio bytes from inline_data
+                                            gemini_audio = part.inline_data.data
+                                            logger.debug(f"[{self.call_sid}] Received audio: {len(gemini_audio)} bytes at 24kHz")
 
-                    logger.debug(f"[{self.call_sid}] 🔄 Resampled to 8kHz: {len(exotel_audio)} bytes")
+                                            # Resample 24kHz → 8kHz for Exotel
+                                            exotel_audio = self.resampler.resample_audio(
+                                                gemini_audio,
+                                                from_rate=GEMINI_OUTPUT_RATE,
+                                                to_rate=EXOTEL_SAMPLE_RATE
+                                            )
 
-                    # Send to Exotel via WebSocket
-                    await self.exotel_ws.send_json({
-                        "event": "media",
-                        "media": {
-                            "payload": base64.b64encode(exotel_audio).decode('utf-8')
-                        }
-                    })
+                                            logger.debug(f"[{self.call_sid}] 🔄 Resampled to 8kHz: {len(exotel_audio)} bytes")
 
-                    audio_chunks_received += 1
-                    logger.debug(f"[{self.call_sid}] ✅ Sent audio chunk #{audio_chunks_received} to Exotel")
+                                            # Send to Exotel via WebSocket
+                                            await self.exotel_ws.send_json({
+                                                "event": "media",
+                                                "media": {
+                                                    "payload": base64.b64encode(exotel_audio).decode('utf-8')
+                                                }
+                                            })
 
-                # Handle text output (for logging transcriptions)
-                if response.text:
-                    logger.info(f"[{self.call_sid}] 🤖 Assistant said: {response.text}")
-                    text_responses.append(response.text)
+                                            audio_chunks_received += 1
+                                            if audio_chunks_received % 10 == 0:
+                                                logger.info(f"[{self.call_sid}] ✅ Sent {audio_chunks_received} audio chunks to Exotel")
 
-                # Handle user input transcription
-                if hasattr(response, 'server_content') and response.server_content:
-                    if hasattr(response.server_content, 'model_turn'):
-                        model_turn = response.server_content.model_turn
-                        if hasattr(model_turn, 'parts'):
-                            for part in model_turn.parts:
-                                if hasattr(part, 'text') and part.text:
-                                    logger.info(f"[{self.call_sid}] 👤 User said: {part.text}")
+                                        # Handle text transcriptions
+                                        if hasattr(part, 'text') and part.text:
+                                            logger.info(f"[{self.call_sid}] 🤖 Assistant said: {part.text}")
+                                            text_responses.append(part.text)
 
-                # Handle turn completion
-                if response.server_content and response.server_content.turn_complete:
-                    logger.info(f"[{self.call_sid}] 🔄 Turn complete - Gemini finished speaking")
-                    logger.info(f"[{self.call_sid}] Total audio chunks sent: {audio_chunks_received}")
+                            # Handle turn completion
+                            if hasattr(response.server_content, 'turn_complete') and response.server_content.turn_complete:
+                                turn_count += 1
+                                logger.info(f"[{self.call_sid}] 🔄 Turn #{turn_count} complete - Gemini finished speaking")
+                                logger.info(f"[{self.call_sid}] Turn #{turn_count} audio chunks sent this turn: {audio_chunks_received}")
+                                # Continue to next iteration - wait for more responses
+
+                    # If receive() completes and session is still active, loop will create new iterator
+                    if self.is_active:
+                        logger.debug(f"[{self.call_sid}] Receive iterator completed, continuing to listen...")
+                        await asyncio.sleep(0.01)  # Small delay before next iteration
+
+                except StopAsyncIteration:
+                    # Iterator completed naturally
+                    if self.is_active:
+                        logger.debug(f"[{self.call_sid}] Iterator completed, restarting receive loop...")
+                        await asyncio.sleep(0.01)
+                    else:
+                        break
 
             logger.info(f"[{self.call_sid}] Audio receive loop ended")
-            logger.info(f"[{self.call_sid}] Total responses: {len(text_responses)}")
+            logger.info(f"[{self.call_sid}] Total turns: {turn_count}, Total audio chunks: {audio_chunks_received}")
 
         except Exception as e:
             logger.error(f"[{self.call_sid}] ❌ Error receiving audio from Gemini: {e}", exc_info=True)
@@ -674,7 +714,7 @@ async def get_stats():
         "config": {
             "max_call_duration": MAX_CALL_DURATION,
             "audio_timeout": AUDIO_TIMEOUT,
-            "gemini_model": "gemini-2.0-flash-exp",
+            "gemini_model": "gemini-2.0-flash-live-001",
         }
     }
 

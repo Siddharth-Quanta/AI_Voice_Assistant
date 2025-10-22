@@ -40,3 +40,7 @@ Thumbs.db
 # Local test files
 audio_dumps/
 test_*.py
+
+# Google Cloud SDK (should be installed separately, not committed)
+Google SDK/
+google-cloud-sdk/
