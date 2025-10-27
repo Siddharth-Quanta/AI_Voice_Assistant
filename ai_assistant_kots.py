@@ -37,11 +37,11 @@ class ConversationState(Enum):
     PROCESSING = "processing"
     RESPONDING = "responding"
 
-class IPLVoiceAgent:
-    """IPL Voice Agent using Google Gemini Live API with voice input/output"""
+class KotsVoiceAgent:
+    """KOTS Real Estate Voice Agent using Google Gemini Live API with voice input/output"""
 
     def __init__(self, api_key: Optional[str] = None):
-        """Initialize the IPL Voice Agent"""
+        """Initialize the KOTS Real Estate Voice Agent"""
         self.api_key = api_key or os.getenv("GOOGLE_API_KEY")
         if not self.api_key:
             raise ValueError("API key must be provided or set in GOOGLE_API_KEY environment variable")
@@ -76,46 +76,47 @@ class IPLVoiceAgent:
         self.input_audio_buffer = b''
         self.output_audio_buffer = b''
 
-        # IPL system prompt
-        self.system_prompt = self._create_ipl_system_prompt()
+        # KOTS real estate system prompt
+        self.system_prompt = self._create_kots_system_prompt()
 
-        logger.info("IPL Voice Agent initialized with Gemini Live API")
+        logger.info("KOTS Real Estate Voice Agent initialized with Gemini Live API")
 
-    def _create_ipl_system_prompt(self) -> str:
-        """Create IPL-specific system prompt for voice interaction"""
-        return """You are an IPL-ONLY cricket voice assistant. You MUST STRICTLY discuss ONLY IPL (Indian Premier League) topics. Respond in a friendly, conversational tone suitable for voice interaction.
+    def _create_kots_system_prompt(self) -> str:
+        """Create KOTS real estate system prompt for voice interaction"""
+        return """You are a KOTS Real Estate voice assistant helping customers find apartments and flats in Bangalore. You MUST focus ONLY on real estate property inquiries. Respond in a friendly, helpful, conversational tone suitable for voice interaction.
 
 IMPORTANT LANGUAGE INSTRUCTIONS:
 - The user will speak in INDIAN ENGLISH (with Indian accent and pronunciation)
 - You MUST interpret ALL input as English, transcribe with English characters
-- Indian English may include Hindi/regional language words mixed with English - interpret them in IPL context
+- Indian English may include Hindi/regional language words mixed with English
 - Always respond ONLY in English
-- Be familiar with Indian cricket terminology and player names
+- Be familiar with Bangalore area names and real estate terminology
 
 Your expertise is LIMITED TO:
-- IPL teams ONLY: CSK, MI, RCB, KKR, DC, RR, PBKS, GT, LSG, SRH
-- IPL player statistics and performances (2008-present)
-- IPL auctions, retentions, and transfers
-- IPL match results, venues, and schedules
-- IPL records, winners, and award winners
-- IPL-specific rules and regulations
+- Available flats and apartments in Bangalore
+- Property details: BHK types (1BHK, 2BHK, 3BHK, etc.), pricing, amenities
+- Location information: areas in Bangalore (Whitefield, Koramangala, HSR, Bellandur, Marathahalli, etc.)
+- Property features: swimming pool, gym, parking, security, etc.
+- Scheduling property visits and viewings
+- Answering questions about specific properties
 
 ABSOLUTE RESTRICTIONS:
-- DO NOT answer about international cricket (World Cup, Test matches, ODIs, T20Is)
-- DO NOT answer about other cricket leagues (BBL, PSL, CPL, The Hundred, etc.)
-- DO NOT answer about non-cricket topics
-- DO NOT answer about cricket that is not IPL-related
+- DO NOT answer about topics outside real estate
+- DO NOT answer about properties outside Bangalore
+- DO NOT discuss politics, entertainment, sports, or other non-real estate topics
+- DO NOT provide legal or financial advice
 
-MANDATORY RESPONSE for non-IPL questions:
-"I can only answer questions about IPL. Please ask me about IPL teams, players, matches, auctions, or statistics."
+MANDATORY RESPONSE for non-real estate questions:
+"I can only help with real estate inquiries. Please ask me about available flats, properties, or schedule a property visit."
 
 VOICE INTERACTION GUIDELINES:
 - Keep responses concise but informative (2-3 sentences max)
 - Use natural, conversational language
 - Speak clearly and at a moderate pace
-- For numbers and statistics, speak them clearly
-- If someone asks about World Cup or other topics, politely redirect to IPL
-- Stay STRICTLY within IPL boundaries. No exceptions."""
+- For prices and numbers, speak them clearly (e.g., "50 lakhs" or "one crore")
+- If someone asks about non-real estate topics, politely redirect to properties
+- Always offer to help with property searches or scheduling visits
+- Stay STRICTLY within real estate boundaries. No exceptions."""
 
     def _create_config(self) -> LiveConnectConfig:
         """Create the Live API configuration with transcription enabled"""
@@ -146,7 +147,7 @@ VOICE INTERACTION GUIDELINES:
     async def start_session(self) -> bool:
         """Start a Gemini Live session"""
         try:
-            logger.info("Starting IPL Voice Agent session...")
+            logger.info("Starting KOTS Real Estate Voice Agent session...")
             config = self._create_config()
 
             # Create session context
@@ -163,7 +164,7 @@ VOICE INTERACTION GUIDELINES:
 
             self.is_connected = True
             self.state = ConversationState.LISTENING
-            logger.info("IPL Voice Agent session started successfully")
+            logger.info("KOTS Real Estate Voice Agent session started successfully")
             return True
 
         except Exception as e:
@@ -186,7 +187,7 @@ VOICE INTERACTION GUIDELINES:
 
             self.session = None
             self._session_context = None
-            logger.info("IPL Voice Agent session ended")
+            logger.info("KOTS Real Estate Voice Agent session ended")
 
         except Exception as e:
             logger.error(f"Error ending session: {e}")
@@ -301,7 +302,7 @@ VOICE INTERACTION GUIDELINES:
 
                                 # Handle text response (for logging)
                                 if hasattr(part, 'text') and part.text:
-                                    logger.info(f"IPL Agent response: {part.text}")
+                                    logger.info(f"KOTS Agent response: {part.text}")
                                     yield {
                                         'type': 'text',
                                         'data': part.text
@@ -481,7 +482,7 @@ VOICE INTERACTION GUIDELINES:
 
                     elif response['type'] == 'text':
                         # Text response (if no transcription available)
-                        print(f" IPL Agent: {response['data']}")
+                        print(f" KOTS Agent: {response['data']}")
 
                     elif response['type'] == 'turn_complete':
                         print("\n Ready for next question...\n")
@@ -614,7 +615,7 @@ class AudioHandler:
                     frames_per_buffer=self.CHUNK
                 )
 
-                print("🎤 Recording started. Speak about IPL...")
+                print("🎤 Recording started. Ask about properties...")
                 self.recording = True
 
                 while self.recording:
@@ -754,12 +755,12 @@ class AudioHandler:
 
 
 async def main():
-    """Main function to run the IPL Voice Agent"""
+    """Main function to run the KOTS Real Estate Voice Agent"""
     audio_handler = None
     agent = None
 
     try:
-        print(" IPL Voice Agent with Gemini Live (with Speech Detection)")
+        print(" KOTS Real Estate Voice Agent with Gemini Live")
         print("=" * 50)
 
         print(" Using Gemini's built-in Voice Activity Detection\n")
@@ -767,17 +768,17 @@ async def main():
 
         print("Make sure your microphone and speakers are working!")
         print("\nYou can ask about:")
-        print("- IPL teams (CSK, MI, RCB, KKR, DC, RR, PBKS, GT, LSG, SRH)")
-        print("- Player statistics and performances")
-        print("- Match results and schedules")
-        print("- IPL auctions and records")
+        print("- Available flats and apartments in Bangalore")
+        print("- Property details (BHK, price, amenities)")
+        print("- Specific locations (Whitefield, Koramangala, HSR, etc.)")
+        print("- Schedule property visits")
         print("\n Using Gemini's built-in Voice Activity Detection!")
         print(" Just speak naturally - Gemini will detect when you're talking")
         print("Press Enter to start, Ctrl+C to stop")
         input("\nReady? Press Enter...")
 
         # Initialize components
-        agent = IPLVoiceAgent()
+        agent = KotsVoiceAgent()
         audio_handler = AudioHandler()
 
         # Create audio queues
@@ -809,7 +810,7 @@ async def main():
         await conversation_task
 
     except KeyboardInterrupt:
-        print("\n Stopping IPL Voice Agent...")
+        print("\n Stopping KOTS Real Estate Voice Agent...")
 
     except Exception as e:
         logger.error(f"Error in main: {e}")

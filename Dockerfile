@@ -1,4 +1,4 @@
-# IPL Voice Assistant - Cloud Run Optimized Dockerfile
+# KOTS Voice Assistant - Cloud Run Optimized Dockerfile
 FROM python:3.11-slim
 
 # Set working directory
@@ -26,9 +26,5 @@ USER appuser
 # Expose port (Cloud Run will set PORT env var)
 EXPOSE 8080
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python -c "import requests; requests.get('http://localhost:8080/')"
-
-# Run the application
-CMD exec uvicorn server:app --host 0.0.0.0 --port ${PORT:-8080} --workers 1
+# Run the application with longer timeout for startup
+CMD exec uvicorn server:app --host 0.0.0.0 --port ${PORT:-8080} --workers 1 --timeout-keep-alive 300

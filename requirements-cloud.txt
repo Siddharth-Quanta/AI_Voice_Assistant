@@ -12,8 +12,9 @@ google-genai
 pydub==0.25.1
 numpy==2.2.1
 
-# HTTP client for health checks
+# HTTP clients
 requests==2.32.3
+httpx==0.28.1  # For async API calls in function calling
 
 # Python utilities
 python-multipart==0.0.20  # For form data parsing
