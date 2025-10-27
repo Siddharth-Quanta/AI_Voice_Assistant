@@ -24,6 +24,7 @@ wheels/
 venv/
 env/
 ENV/
+.venv/
 
 # IDE
 .vscode/
@@ -35,21 +36,41 @@ ENV/
 # Environment files
 .env
 .env.local
+.env.*
 
 # Git
 .git/
 .gitignore
+.gitattributes
 
 # Documentation
 *.md
 docs/
 
 # Original desktop app (not needed for deployment)
-ipl_voice_interupption.py
+ai_assistant_kots.py
+
+# Google Cloud SDK (large, not needed in container)
+Google SDK/
+
+# Development files
+notes.txt
+requirements.txt
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+*.cover
+.hypothesis/
 
 # Logs
 *.log
+logs/
 
 # OS
 .DS_Store
 Thumbs.db
+*.bak
+*.tmp
