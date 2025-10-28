@@ -16,6 +16,9 @@ numpy==2.2.1
 requests==2.32.3
 httpx==0.28.1  # For async API calls in function calling
 
+# Database
+asyncpg  # PostgreSQL async driver for caller identification
+
 # Python utilities
 python-multipart==0.0.20  # For form data parsing
 python-dotenv  # For environment variables

@@ -5,3 +5,5 @@ websockets
 pydub
 numpy
 python-dotenv
+asyncpg
+httpx
