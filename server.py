@@ -109,8 +109,15 @@ async def startup_event():
     logger.info("🚀 Application startup - Initializing database connection...")
     db_initialized = await init_db_pool()
     if db_initialized:
-        # Test the connection
-        await test_database_connection()
+        # Quick connection test only (skip count queries for faster startup)
+        try:
+            from database import db_pool
+            if db_pool:
+                async with db_pool.acquire() as conn:
+                    await conn.fetchval('SELECT 1')
+                    logger.info("✅ Database connection verified")
+        except Exception as e:
+            logger.warning(f"⚠️ Database test failed: {e}")
         logger.info("✅ Database initialization complete")
     else:
         logger.warning("⚠️ Database initialization failed - continuing without database")
@@ -330,18 +337,14 @@ async def execute_function_call(function_name: str, function_args: Dict[str, Any
                 # Get top 2 properties with highest availability
                 top_2 = sorted(available_properties, key=lambda x: x.get("availableFlats", 0), reverse=True)[:2]
 
-                # Create a simple, conversational response
-                property_list = []
-                for prop in top_2:
-                    name = prop.get("displayLocation", "Unknown")
-                    available = prop.get("availableFlats", 0)
-                    property_list.append(f"{name} with {available} flats available")
+                # Create response WITHOUT property names, only flat counts
+                flat_counts = [str(prop.get("availableFlats", 0)) for prop in top_2]
 
-                # Return a concise response with only top 2
+                # Return count with flat availability, NO property names
                 if len(available_properties) > 2:
-                    response_text = f"I found {len(available_properties)} properties with availability in {area}. Top 2 are: " + " and ".join(property_list) + ". Would you like details on any of these?"
+                    response_text = f"{len(available_properties)} properties in {area} with {' and '.join(flat_counts)} flats available for the top 2"
                 else:
-                    response_text = f"I found {len(available_properties)} properties with availability in {area}: " + " and ".join(property_list) + ". Would you like more details?"
+                    response_text = f"{len(available_properties)} properties in {area} with {' and '.join(flat_counts)} flats available"
 
                 return response_text
 
@@ -730,16 +733,30 @@ class ExotelGeminiSession:
                                 logger.info(f"[{self.call_sid}] ✅ Function executed successfully")
                                 logger.info(f"[{self.call_sid}] 📝 Response preview: {result_preview}")
 
+                                # 🔍 DETAILED DEBUG: Log exact response structure
+                                logger.info(f"[{self.call_sid}] 🔍 DEBUG - Function result type: {type(function_result)}")
+                                logger.info(f"[{self.call_sid}] 🔍 DEBUG - Function result length: {len(function_result)} chars")
+                                logger.info(f"[{self.call_sid}] 🔍 DEBUG - FULL function result: '{function_result}'")
+
                                 # Send result back with ID (CRITICAL!)
                                 try:
+                                    response_payload = {
+                                        "id": function_id,  # MUST include ID from tool_call
+                                        "name": function_name,
+                                        "response": {"result": function_result}  # Must wrap string in dict!
+                                    }
+
+                                    # 🔍 DETAILED DEBUG: Log exact payload being sent to Gemini
+                                    logger.info(f"[{self.call_sid}] 🔍 DEBUG - Payload structure:")
+                                    logger.info(f"[{self.call_sid}] 🔍 DEBUG -   id: {response_payload['id']}")
+                                    logger.info(f"[{self.call_sid}] 🔍 DEBUG -   name: {response_payload['name']}")
+                                    logger.info(f"[{self.call_sid}] 🔍 DEBUG -   response.result: '{response_payload['response']['result']}'")
+
                                     await self.gemini_session.send_tool_response(
-                                        function_responses=[{
-                                            "id": function_id,  # MUST include ID from tool_call
-                                            "name": function_name,
-                                            "response": {"result": function_result}  # Must wrap string in dict!
-                                        }]
+                                        function_responses=[response_payload]
                                     )
                                     logger.info(f"[{self.call_sid}] 📤 Function response sent back to Gemini")
+                                    logger.info(f"[{self.call_sid}] ⏳ Waiting for Gemini to process and respond...")
                                 except Exception as e:
                                     logger.error(f"[{self.call_sid}] ❌ Error sending tool response: {e}", exc_info=True)
 
@@ -781,6 +798,7 @@ class ExotelGeminiSession:
                                         # Handle text transcriptions
                                         if hasattr(part, 'text') and part.text:
                                             logger.info(f"[{self.call_sid}] 🤖 Assistant said: {part.text}")
+                                            logger.info(f"[{self.call_sid}] 🔍 DEBUG - Gemini text response length: {len(part.text)} chars")
                                             text_responses.append(part.text)
 
                                 # Handle audio transcriptions
@@ -788,6 +806,7 @@ class ExotelGeminiSession:
                                     if hasattr(response.server_content.output_transcription, 'text') and response.server_content.output_transcription.text:
                                         transcript_text = response.server_content.output_transcription.text
                                         logger.info(f"[{self.call_sid}] 📝 ASSISTANT TRANSCRIPT: {transcript_text}")
+                                        logger.info(f"[{self.call_sid}] 🔍 DEBUG - Transcript length: {len(transcript_text)} chars")
                                         text_responses.append(transcript_text)
 
                                 if hasattr(response.server_content, 'input_transcription') and response.server_content.input_transcription:
