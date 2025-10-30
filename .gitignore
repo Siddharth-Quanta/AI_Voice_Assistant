@@ -44,3 +44,8 @@ test_*.py
 # Google Cloud SDK (should be installed separately, not committed)
 Google SDK/
 google-cloud-sdk/
+
+# Documentation and notes (contain sensitive info or temporary files)
+Call.drawio.pdf
+Call.drawio.pdf:Zone.Identifier
+info.txt

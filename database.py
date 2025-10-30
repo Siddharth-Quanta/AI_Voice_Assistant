@@ -208,21 +208,27 @@ async def identify_caller(phone_number: str) -> Dict[str, Any]:
         }
 
 
-async def save_ticket(
-    tenant_data: Dict[str, Any],
-    category_info: Dict[str, Any],
-    issue_description: str
+async def save_to_sales_webhook(
+    name: str,
+    phone: str,
+    location: str,
+    flat_type: str,
+    channel: str = "Voice Call",
+    campaign_id: str = ""
 ) -> Optional[int]:
     """
-    Save ticket to tenant_tickets table
+    Save sales lead information to sales_webhook table
 
     Args:
-        tenant_data: Tenant information from identify_caller
-        category_info: Category details from TicketCategoryMatcher
-        issue_description: Detailed description of the issue from conversation
+        name: Customer name
+        phone: Phone number
+        location: Preferred location (e.g., "HSR Layout", "Whitefield")
+        flat_type: Flat type (e.g., "1BHK", "2BHK", "Studio")
+        channel: Channel source (default: "Voice Call")
+        campaign_id: Campaign ID (default: empty string)
 
     Returns:
-        ticket_id (int) if successful, None if failed
+        record_id (int) if successful, None if failed
     """
     if not db_pool:
         logger.error("Database pool not initialized")
@@ -230,152 +236,221 @@ async def save_ticket(
 
     try:
         async with db_pool.acquire() as conn:
-            # Extract tenant info
-            tenant_name = tenant_data.get('name', '')
-            # Split name into first and last name
-            name_parts = tenant_name.split(' ', 1)
-            last_name = name_parts[1] if len(name_parts) > 1 else ''
-
-            # Insert ticket
             insert_query = """
-                INSERT INTO tenant_tickets (
-                    subject,
-                    description,
-                    department,
-                    department_id,
-                    channel,
-                    status,
-                    priority,
-                    email,
-                    phone,
-                    layout,
-                    layout_id,
-                    team_id,
-                    classification,
-                    sub_category,
-                    issue_type,
-                    module,
-                    assigned_to,
-                    cf_booking_id,
-                    cf_flat_unique_id,
-                    cf_last_name,
-                    cf_issue_description,
-                    created_at,
-                    updated_at
-                ) VALUES (
-                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-                    $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
-                    $21, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
-                )
-                RETURNING id
-            """
-
-            ticket_id = await conn.fetchval(
-                insert_query,
-                category_info.get('subject', ''),                    # subject
-                issue_description,                                   # description
-                category_info.get('department', ''),                # department
-                category_info.get('department_id', ''),             # department_id
-                'AI Voice Assistant',                                # channel
-                'Open',                                              # status
-                'Medium',                                            # priority
-                tenant_data.get('email', ''),                       # email
-                tenant_data.get('phone', ''),                       # phone
-                category_info.get('layout', ''),                    # layout
-                category_info.get('layout_id', ''),                 # layout_id
-                category_info.get('team_id', ''),                   # team_id
-                category_info.get('classification', ''),            # classification
-                category_info.get('sub_category', ''),              # sub_category
-                category_info.get('issue_type', ''),                # issue_type
-                category_info.get('module', ''),                    # module
-                category_info.get('assigned_to', ''),               # assigned_to
-                tenant_data.get('tenant_id', ''),                   # cf_booking_id
-                tenant_data.get('flat', ''),                        # cf_flat_unique_id
-                last_name,                                           # cf_last_name
-                issue_description                                    # cf_issue_description
-            )
-
-            logger.info(f"✅ Ticket #{ticket_id} created successfully")
-            logger.info(f"   Type: {category_info.get('issue_type')}")
-            logger.info(f"   Tenant: {tenant_name} ({tenant_data.get('flat')})")
-            logger.info(f"   Department: {category_info.get('assigned_to')}")
-
-            return ticket_id
-
-    except Exception as e:
-        logger.error(f"❌ Error saving ticket: {e}", exc_info=True)
-        return None
-
-
-async def save_lead_information(
-    caller_number: str,
-    call_sid: str,
-    customer_name: Optional[str] = None,
-    lead_status: str = "new",
-    call_duration: Optional[int] = None
-) -> Optional[int]:
-    """
-    Save lead information to new_lead table when lead/new caller enquires about properties
-
-    Args:
-        caller_number: Phone number of the caller
-        call_sid: Call session ID
-        customer_name: Name of the lead (optional, can be None for anonymous)
-        lead_status: "new" for new callers, "existing" for existing leads
-        call_duration: Duration of call in seconds (optional)
-
-    Returns:
-        lead_id (int) if successful, None if failed
-    """
-    if not db_pool:
-        logger.error("Database pool not initialized")
-        return None
-
-    try:
-        async with db_pool.acquire() as conn:
-            # Insert lead data
-            insert_query = """
-                INSERT INTO new_lead (
+                INSERT INTO sales_webhook (
                     timestamp,
-                    customer_name,
-                    lead_status,
-                    caller_number,
-                    call_sid,
-                    call_duration,
-                    created_at,
-                    updated_at
+                    name,
+                    phone,
+                    channel,
+                    campaign_id,
+                    location,
+                    flat_type
                 ) VALUES (
                     CURRENT_TIMESTAMP,
-                    $1,
-                    $2,
-                    $3,
-                    $4,
-                    $5,
-                    CURRENT_TIMESTAMP,
-                    CURRENT_TIMESTAMP
+                    $1, $2, $3, $4, $5, $6
                 )
                 RETURNING id
             """
 
-            lead_id = await conn.fetchval(
+            record_id = await conn.fetchval(
                 insert_query,
-                customer_name,           # customer_name (can be NULL)
-                lead_status,             # lead_status ("new" or "existing")
-                caller_number,           # caller_number
-                call_sid,                # call_sid
-                call_duration            # call_duration (can be NULL)
+                name,
+                phone,
+                channel,
+                campaign_id,
+                location,
+                flat_type
             )
 
-            logger.info(f"✅ Lead data saved successfully! Lead ID: {lead_id}")
-            logger.info(f"   Name: {customer_name or 'Not provided'}")
-            logger.info(f"   Phone: {caller_number}")
-            logger.info(f"   Status: {lead_status}")
-            logger.info(f"   Call SID: {call_sid}")
+            logger.info(f"✅ Sales lead saved to sales_webhook! ID: {record_id}")
+            logger.info(f"   Name: {name}")
+            logger.info(f"   Phone: {phone}")
+            logger.info(f"   Location: {location}")
+            logger.info(f"   Flat Type: {flat_type}")
 
-            return lead_id
+            return record_id
 
     except Exception as e:
-        logger.error(f"❌ Error saving lead information: {e}", exc_info=True)
+        logger.error(f"❌ Error saving to sales_webhook: {e}", exc_info=True)
+        return None
+
+
+async def save_to_landlord_webhook(
+    name: str,
+    phone: str,
+    channel: str = "Voice Call",
+    campaign_id: str = ""
+) -> Optional[int]:
+    """
+    Save landlord information to landlord_webhook table
+
+    Args:
+        name: Landlord name
+        phone: Phone number
+        channel: Channel source (default: "Voice Call")
+        campaign_id: Campaign ID (default: empty string)
+
+    Returns:
+        record_id (int) if successful, None if failed
+    """
+    if not db_pool:
+        logger.error("Database pool not initialized")
+        return None
+
+    try:
+        async with db_pool.acquire() as conn:
+            insert_query = """
+                INSERT INTO landlord_webhook (
+                    timestamp,
+                    name,
+                    phone,
+                    channel,
+                    campaign_id
+                ) VALUES (
+                    CURRENT_TIMESTAMP,
+                    $1, $2, $3, $4
+                )
+                RETURNING id
+            """
+
+            record_id = await conn.fetchval(
+                insert_query,
+                name,
+                phone,
+                channel,
+                campaign_id
+            )
+
+            logger.info(f"✅ Landlord saved to landlord_webhook! ID: {record_id}")
+            logger.info(f"   Name: {name}")
+            logger.info(f"   Phone: {phone}")
+
+            return record_id
+
+    except Exception as e:
+        logger.error(f"❌ Error saving to landlord_webhook: {e}", exc_info=True)
+        return None
+
+
+async def save_to_service_webhook(
+    name: str,
+    phone: str,
+    booking_id: str,
+    ticket_category: str,
+    ticket_description: str,
+    channel: str = "Voice Call"
+) -> Optional[int]:
+    """
+    Save tenant service request to service_webhook table
+
+    Args:
+        name: Tenant name
+        phone: Phone number
+        booking_id: Booking ID from services_tenants
+        ticket_category: Category (e.g., "Maintenance", "Plumbing")
+        ticket_description: Description of the issue
+        channel: Channel source (default: "Voice Call")
+
+    Returns:
+        record_id (int) if successful, None if failed
+    """
+    if not db_pool:
+        logger.error("Database pool not initialized")
+        return None
+
+    try:
+        async with db_pool.acquire() as conn:
+            insert_query = """
+                INSERT INTO service_webhook (
+                    timestamp,
+                    name,
+                    phone,
+                    channel,
+                    booking_id,
+                    ticket_category,
+                    ticket_description
+                ) VALUES (
+                    CURRENT_TIMESTAMP,
+                    $1, $2, $3, $4, $5, $6
+                )
+                RETURNING id
+            """
+
+            record_id = await conn.fetchval(
+                insert_query,
+                name,
+                phone,
+                channel,
+                booking_id,
+                ticket_category,
+                ticket_description
+            )
+
+            logger.info(f"✅ Service request saved to service_webhook! ID: {record_id}")
+            logger.info(f"   Name: {name}")
+            logger.info(f"   Booking ID: {booking_id}")
+            logger.info(f"   Category: {ticket_category}")
+
+            return record_id
+
+    except Exception as e:
+        logger.error(f"❌ Error saving to service_webhook: {e}", exc_info=True)
+        return None
+
+
+async def save_to_contact_logs(
+    name: str,
+    phone: str,
+    channel: str = "Voice Call",
+    campaign_id: str = ""
+) -> Optional[int]:
+    """
+    Save all contact logs to capture_contact_logs table
+    Called for EVERY call to track analytics
+
+    Args:
+        name: Caller name (if available)
+        phone: Phone number
+        channel: Channel source (default: "Voice Call")
+        campaign_id: Campaign ID (default: empty string)
+
+    Returns:
+        record_id (int) if successful, None if failed
+    """
+    if not db_pool:
+        logger.error("Database pool not initialized")
+        return None
+
+    try:
+        async with db_pool.acquire() as conn:
+            insert_query = """
+                INSERT INTO capture_contact_logs (
+                    timestamp,
+                    name,
+                    phone,
+                    channel,
+                    campaign_id
+                ) VALUES (
+                    CURRENT_TIMESTAMP,
+                    $1, $2, $3, $4
+                )
+                RETURNING id
+            """
+
+            record_id = await conn.fetchval(
+                insert_query,
+                name,
+                phone,
+                channel,
+                campaign_id
+            )
+
+            logger.info(f"✅ Contact logged to capture_contact_logs! ID: {record_id}")
+
+            return record_id
+
+    except Exception as e:
+        logger.error(f"❌ Error saving to capture_contact_logs: {e}", exc_info=True)
         return None
 
 

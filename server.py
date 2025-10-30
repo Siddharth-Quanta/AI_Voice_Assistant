@@ -43,7 +43,8 @@ from prompts import (
 # Import database module
 from database import (
     init_db_pool, close_db_pool, identify_caller, test_database_connection,
-    save_ticket, save_lead_information
+    save_to_sales_webhook, save_to_landlord_webhook,
+    save_to_service_webhook, save_to_contact_logs
 )
 
 # Import ticket category matching
@@ -171,310 +172,267 @@ KOTS_API_BASE = "https://kots-website-staging.quantaops.com/api"
 def _get_function_declarations():
     """Define all available functions for Gemini to call during conversation"""
 
-    get_properties_function = FunctionDeclaration(
-        name="get_properties_by_area",
-        description="""Fetches all available properties and flats in a specific area of Bangalore.
-        Use this when the user asks about:
-        - Properties available in a location (e.g., "properties in Whitefield", "flats in Koramangala")
-        - Availability in an area
-        - What properties you have in a location
-        Returns real-time property data including names, locations, and available flat counts.""",
+    save_sales_lead_function = FunctionDeclaration(
+        name="save_sales_lead",
+        description="""Saves sales lead information when NEW CALLER or LEAD enquires about properties.
+        Use this when customer wants to book or view flats.
+        Call this AFTER collecting:
+        1. Customer name
+        2. Preferred location
+        3. Flat type preference (Studio, 1BHK, 2BHK, 3BHK)
+
+        The system will generate a landing page URL and send it via WhatsApp/SMS.""",
         parameters={
             "type": "object",
             "properties": {
-                "area": {
+                "name": {
                     "type": "string",
-                    "description": """The area name in Bangalore. Examples: 'bangalore' (for all), 'whitefield', 'koramangala', 'marathahalli', 'bellandur', 'hennur', 'sarjapur', 'hsr', 'mahadevpura'.
-                    Use 'bangalore' to get all properties across Bangalore."""
+                    "description": "Customer name. If not provided, use 'Not provided'."
+                },
+                "location": {
+                    "type": "string",
+                    "description": "Preferred location: whitefield, hennur, marathahalli, bellandur, sarjapur, koramangala, hsr, or mahadevpura"
+                },
+                "flat_type": {
+                    "type": "string",
+                    "description": "Flat type: studio, 1bhk, 2bhk, or 3bhk"
                 }
             },
-            "required": ["area"]
+            "required": ["name", "location", "flat_type"]
         }
     )
 
-    get_flat_details_function = FunctionDeclaration(
-        name="get_flat_details",
-        description="""Fetches detailed information about a specific property or flat.
-        Use this when the user asks about:
-        - Details of a specific property (e.g., "tell me about KOTS RUE", "what's available in KOTS SEREIN")
-        - Specific flat information (e.g., "details of flat K05A205")
-        - Amenities, pricing, or features of a property
-        - City is always 'bangalore'
-        Returns detailed property/flat information including amenities, pricing, availability, images, etc.""",
+    save_landlord_lead_function = FunctionDeclaration(
+        name="save_landlord_lead",
+        description="""Saves landlord information when someone wants to list their property with KOTS.
+        Use this when customer:
+        - Wants to list their property
+        - Is a property owner interested in partnership
+        - Asks about becoming a landlord with KOTS
+
+        Only collect name, team will follow up.""",
         parameters={
             "type": "object",
             "properties": {
-                "city": {
+                "name": {
                     "type": "string",
-                    "description": "City name. ALWAYS set this to 'bangalore'. Never use any other value.",
-                    "enum": ["bangalore"]
-                },
-                "area": {
-                    "type": "string",
-                    "description": "Area name in lowercase (e.g., 'whitefield', 'marathahalli', 'bellandur', 'koramangala', 'hennur', 'sarjapur', 'hsr', 'mahadevpura')"
-                },
-                "slug": {
-                    "type": "string",
-                    "description": "Property slug in lowercase (e.g., 'kots-rue', 'kots-serein', 'kots-bien', 'kots-neuf'). Convert property names to slugs by using lowercase and hyphens."
-                },
-                "flat": {
-                    "type": "string",
-                    "description": "Optional: Specific flat code (e.g., 'k05a205', 'k16a101'). Only provide if user asks about a specific flat. Leave empty otherwise."
+                    "description": "Landlord name. If not provided, use 'Not provided'."
                 }
             },
-            "required": ["city", "area", "slug"]
+            "required": ["name"]
         }
     )
 
-    create_ticket_function = FunctionDeclaration(
-        name="create_maintenance_ticket",
-        description="""Creates a maintenance or service ticket for TENANTS ONLY.
+    save_tenant_service_function = FunctionDeclaration(
+        name="save_tenant_service",
+        description="""Creates service request for EXISTING TENANTS ONLY.
         Use this when a TENANT reports:
-        - Plumbing issues (leaks, taps, toilets, drainage)
-        - Electrical issues (lights, fans, power, switches)
-        - Appliance issues (AC, fridge, washing machine, geyser)
-        - Carpenter issues (doors, cabinets, furniture)
-        - WiFi issues (speed, connection, login)
+        - Plumbing, electrical, carpenter, appliance issues
+        - WiFi problems
         - Common area issues (cleanliness, security, parking, garbage)
-        - Any other maintenance request
+        - Check-in/check-out requests
+        - Any maintenance request
 
-        IMPORTANT: Only call this for TENANTS. Do NOT call for leads or new callers.
-        After calling this function, you will receive a ticket ID to confirm to the tenant.""",
+        IMPORTANT: Only for tenants with active booking_id. System will check automatically.""",
         parameters={
             "type": "object",
             "properties": {
-                "issue_type": {
+                "ticket_category": {
                     "type": "string",
-                    "description": """The type of issue being reported. Must be one of:
-                    plumbing, electrical, carpenter, appliance, furniture, pest, wifi_speed, wifi_disconnection,
-                    wifi_login, cleanliness, security, garbage, parking_issues, check_in, check_out,
-                    rental_invoices, payment_link, one_time_housekeeping, car_parking, duplicate_keys,
-                    water_can, callback, or other_flat_issues"""
+                    "description": """Issue category: Plumbing, Electrical, Carpenter, Appliance, WiFi, Cleanliness,
+                    Security, Garbage, Parking, Check-in, Check-out, Housekeeping, Keys, Water, Callback, or Other"""
                 },
-                "issue_description": {
+                "ticket_description": {
                     "type": "string",
-                    "description": "Detailed description of the issue in 1-2 sentences. Include location if mentioned (e.g., 'kitchen tap leaking', 'bedroom AC not cooling')."
+                    "description": "Brief description of the issue (1-2 sentences)."
                 }
             },
-            "required": ["issue_type", "issue_description"]
+            "required": ["ticket_category", "ticket_description"]
         }
     )
 
-    collect_lead_info_function = FunctionDeclaration(
-        name="collect_lead_information",
-        description="""Collects and saves lead information for LEADS and NEW CALLERS ONLY when they enquire about properties.
-        Use this when a LEAD or NEW CALLER:
-        - Asks about available properties
-        - Shows interest in viewing flats
-        - Requests property details
-        - Enquires about pricing or amenities
-
-        IMPORTANT: Only call this for LEADS or NEW CALLERS. Do NOT call for tenants.
-        Call this AFTER showing them property information to capture their interest.""",
-        parameters={
-            "type": "object",
-            "properties": {
-                "customer_name": {
-                    "type": "string",
-                    "description": "Name of the lead. If they haven't provided their name, use 'Not provided'. Never leave this empty."
-                }
-            },
-            "required": ["customer_name"]
-        }
-    )
-
-    return [get_properties_function, get_flat_details_function, create_ticket_function, collect_lead_info_function]
+    return [save_sales_lead_function, save_landlord_lead_function, save_tenant_service_function]
 
 
-async def execute_function_call(function_name: str, function_args: Dict[str, Any], session: Optional['ExotelGeminiSession'] = None) -> Dict[str, Any]:
+def generate_landing_page_url(location: str, flat_type: str) -> str:
     """
-    Execute the actual API calls when Gemini requests function execution
+    Generate landing page URL based on location and flat type
+
+    Args:
+        location: Location name (e.g., "whitefield", "hsr", "koramangala")
+        flat_type: Flat type (e.g., "1bhk", "2bhk", "3bhk", "studio")
+
+    Returns:
+        Full landing page URL
+    """
+    # Normalize location (lowercase, remove spaces)
+    location_normalized = location.lower().strip().replace(" ", "")
+
+    # Normalize flat_type (lowercase, ensure format is correct)
+    flat_type_normalized = flat_type.lower().strip().replace(" ", "")
+
+    # Ensure flat_type has hyphen format (1-bhk, 2-bhk, etc.)
+    if "bhk" in flat_type_normalized and "-" not in flat_type_normalized:
+        flat_type_normalized = flat_type_normalized.replace("bhk", "-bhk")
+
+    url = f"https://www.kots.world/bangalore/{location_normalized}/{flat_type_normalized}"
+
+    logger.info(f"🔗 Generated landing page URL: {url}")
+    return url
+
+
+async def execute_function_call(function_name: str, function_args: Dict[str, Any], session: Optional['ExotelGeminiSession'] = None) -> str:
+    """
+    Execute function calls from Gemini
 
     Args:
         function_name: Name of the function to call
         function_args: Arguments provided by Gemini
-        session: Optional session context for tenant-specific functions
+        session: Session context for accessing caller info
 
     Returns:
-        API response data
+        Response string to send back to Gemini
     """
     try:
         logger.info(f"📞 Executing function: {function_name} with args: {function_args}")
 
-        async with httpx.AsyncClient(timeout=10.0) as http_client:
-            if function_name == "get_properties_by_area":
-                area = function_args.get("area", "bangalore")
-                url = f"{KOTS_API_BASE}/getPropertiesAndFlats?area={area}"
+        if function_name == "save_sales_lead":
+            # Extract arguments
+            name = function_args.get("name", "Not provided")
+            location = function_args.get("location", "").lower().strip()
+            flat_type = function_args.get("flat_type", "").lower().strip()
 
-                logger.info(f"🌐 Calling API: GET {url}")
-                response = await http_client.get(url)
-                response.raise_for_status()
+            if not session:
+                logger.error("❌ No session context for save_sales_lead")
+                return "I'm having trouble processing your request. Please try again."
 
-                data = response.json()
-                properties = data.get('properties', [])
-                logger.info(f"✅ API returned {len(properties)} properties")
+            logger.info(f"💼 Saving sales lead:")
+            logger.info(f"   Name: {name}")
+            logger.info(f"   Phone: {session.caller_number}")
+            logger.info(f"   Location: {location}")
+            logger.info(f"   Flat Type: {flat_type}")
 
-                # DEBUG: Log first 3 properties to see actual data structure
-                for i, prop in enumerate(properties[:3]):
-                    logger.info(f"🔍 Property {i+1}: name={prop.get('displayLocation')}, availableFlats={prop.get('availableFlats')}")
+            # Generate landing page URL
+            landing_url = generate_landing_page_url(location, flat_type)
 
-                # Filter by area first (API doesn't filter correctly, so we do it client-side)
-                if area.lower() != "bangalore":
-                    # Only include properties where displayLocation contains the requested area
-                    properties = [
-                        p for p in properties
-                        if area.lower() in p.get("displayLocation", "").lower()
-                    ]
-                    logger.info(f"📍 After area filtering: {len(properties)} properties in {area}")
+            # Save to sales_webhook database
+            record_id = await save_to_sales_webhook(
+                name=name,
+                phone=session.caller_number,
+                location=location,
+                flat_type=flat_type,
+                channel="Voice Call",
+                campaign_id=""
+            )
 
-                # Then filter by availability (API uses camelCase!)
-                available_properties = [p for p in properties if p.get("availableFlats", 0) > 0]
-                logger.info(f"📊 Final result: {len(available_properties)} available properties in {area}")
+            # Also log to contact_logs
+            await save_to_contact_logs(
+                name=name,
+                phone=session.caller_number,
+                channel="Voice Call",
+                campaign_id=""
+            )
 
-                if not available_properties:
-                    return f"I found {len(properties)} properties in {area}, but currently all flats are occupied. Would you like me to notify you when flats become available?"
-
-                # Get top 2 properties with highest availability
-                top_2 = sorted(available_properties, key=lambda x: x.get("availableFlats", 0), reverse=True)[:2]
-
-                # Create response WITHOUT property names, only flat counts
-                flat_counts = [str(prop.get("availableFlats", 0)) for prop in top_2]
-
-                # Return count with flat availability, NO property names
-                if len(available_properties) > 2:
-                    response_text = f"{len(available_properties)} properties in {area} with {' and '.join(flat_counts)} flats available for the top 2"
-                else:
-                    response_text = f"{len(available_properties)} properties in {area} with {' and '.join(flat_counts)} flats available"
-
-                return response_text
-
-            elif function_name == "get_flat_details":
-                city = function_args.get("city", "bangalore")
-                area = function_args.get("area")
-                slug = function_args.get("slug")
-                flat = function_args.get("flat")
-
-                url = f"{KOTS_API_BASE}/getFriendlyUrls"
-                payload = {
-                    "slug": {
-                        "city": city,
-                        "area": area,
-                        "slug": slug
-                    }
-                }
-
-                # Add flat code if provided
-                if flat:
-                    payload["slug"]["flat"] = flat
-
-                logger.info(f"🌐 Calling API: POST {url} with payload: {payload}")
-                response = await http_client.post(url, json=payload)
-                response.raise_for_status()
-
-                data = response.json()
-                logger.info(f"✅ API returned flat details for {slug}")
-
-                # Extract key details and create conversational response
-                property_name = data.get('property', {}).get('name', slug)
-                flat_info = data.get('flat', {})
-                bhk = flat_info.get('bhk_type', 'N/A')
-                price = flat_info.get('price', 'Contact us')
-
-                response_text = f"I found details for {property_name}. "
-                if flat:
-                    response_text += f"The flat {flat} is a {bhk} priced at {price}."
-                else:
-                    response_text += f"This property has various flats available. Would you like details on a specific flat?"
-
-                return response_text
-
-            elif function_name == "create_maintenance_ticket":
-                # Validate tenant status
-                if not session or session.caller_type != "tenant":
-                    logger.warning(f"⚠️ Ticket creation attempted by non-tenant (type: {session.caller_type if session else 'unknown'})")
-                    return "I apologize, but I can only create maintenance tickets for registered tenants. How else can I help you?"
-
-                if not session.caller_data:
-                    logger.error("❌ Ticket creation failed: No tenant data available")
-                    return "I'm having trouble accessing your tenant information. Please try again."
-
-                # Extract arguments
-                issue_type = function_args.get("issue_type", "other_flat_issues")
-                issue_description = function_args.get("issue_description", "Tenant reported an issue via voice assistant")
-
-                logger.info(f"🎫 Creating ticket for tenant: {session.caller_data.get('name')} (Flat: {session.caller_data.get('flat')})")
-                logger.info(f"   Issue Type: {issue_type}")
-                logger.info(f"   Description: {issue_description}")
-
-                # Get category info from ticket matcher
-                category_info = session.ticket_matcher.get_category_info(issue_type)
-                if not category_info:
-                    logger.warning(f"⚠️ Unknown issue type: {issue_type}, using fallback")
-                    category_info = session.ticket_matcher.get_category_info("other_flat_issues")
-
-                # Create ticket in database
-                ticket_id = await save_ticket(
-                    tenant_data=session.caller_data,
-                    category_info=category_info,
-                    issue_description=issue_description
-                )
-
-                if ticket_id:
-                    session.ticket_created = True
-                    session.ticket_id = ticket_id
-                    logger.info(f"✅ Ticket #{ticket_id} created successfully!")
-                    return f"I've created maintenance ticket number {ticket_id} for your {category_info['issue_type']}. Our team will reach out to you shortly."
-                else:
-                    logger.error("❌ Failed to create ticket in database")
-                    return "I apologize, but I'm having trouble creating the ticket right now. I'll notify our team about your issue through another channel."
-
-            elif function_name == "collect_lead_information":
-                # Validate lead/new_caller status
-                if not session or session.caller_type == "tenant":
-                    logger.warning(f"⚠️ Lead data collection attempted by tenant")
-                    return "Thank you for your interest! Is there anything else I can help you with?"
-
-                # Extract customer name
-                customer_name = function_args.get("customer_name", "Not provided")
-
-                # Determine lead status
-                if session.caller_type == "lead":
-                    lead_status = "existing"
-                    logger.info(f"📋 Collecting data for EXISTING LEAD")
-                else:  # new_caller
-                    lead_status = "new"
-                    logger.info(f"📋 Collecting data for NEW LEAD")
-
-                logger.info(f"   Name: {customer_name}")
-                logger.info(f"   Phone: {session.caller_number}")
-                logger.info(f"   Status: {lead_status}")
-
-                # Save lead information to database
-                lead_id = await save_lead_information(
-                    caller_number=session.caller_number,
-                    call_sid=session.call_sid,
-                    customer_name=customer_name if customer_name != "Not provided" else None,
-                    lead_status=lead_status,
-                    call_duration=None  # Will be updated at call end
-                )
-
-                if lead_id:
-                    logger.info(f"✅ Lead #{lead_id} saved successfully!")
-                    return "Thank you for your interest! Our team will reach out to you shortly with more details about our properties. Is there anything else you'd like to know?"
-                else:
-                    logger.error("❌ Failed to save lead information")
-                    return "Thank you for your interest! Our team will contact you soon. Is there anything else I can help you with?"
-
+            if record_id:
+                logger.info(f"✅ Sales lead saved! Record ID: {record_id}, URL: {landing_url}")
+                # TODO: Send WhatsApp/SMS with landing_url
+                return "Thank you for giving us the details. We have shared the link to view the available flats over whatsapp and sms. You may click on the link and book it directly online."
             else:
-                logger.error(f"❌ Unknown function: {function_name}")
-                return f"I encountered an error: unknown function {function_name}. Please try again."
+                logger.error("❌ Failed to save sales lead")
+                return "Thank you for your interest! Our team will contact you shortly with property details."
 
-    except httpx.HTTPError as e:
-        logger.error(f"❌ HTTP error calling API: {e}")
-        return f"I'm having trouble connecting to our property database right now. Please try again in a moment."
+        elif function_name == "save_landlord_lead":
+            # Extract arguments
+            name = function_args.get("name", "Not provided")
+
+            if not session:
+                logger.error("❌ No session context for save_landlord_lead")
+                return "I'm having trouble processing your request. Please try again."
+
+            logger.info(f"🏢 Saving landlord lead:")
+            logger.info(f"   Name: {name}")
+            logger.info(f"   Phone: {session.caller_number}")
+
+            # Save to landlord_webhook database
+            record_id = await save_to_landlord_webhook(
+                name=name,
+                phone=session.caller_number,
+                channel="Voice Call",
+                campaign_id=""
+            )
+
+            # Also log to contact_logs
+            await save_to_contact_logs(
+                name=name,
+                phone=session.caller_number,
+                channel="Voice Call",
+                campaign_id=""
+            )
+
+            if record_id:
+                logger.info(f"✅ Landlord lead saved! Record ID: {record_id}")
+                return "Thank you for showing interest with Kots. Our team will get back to you shortly."
+            else:
+                logger.error("❌ Failed to save landlord lead")
+                return "Thank you for your interest! Our team will contact you soon."
+
+        elif function_name == "save_tenant_service":
+            # Validate tenant status
+            if not session or session.caller_type != "tenant":
+                logger.warning(f"⚠️ Service request attempted by non-tenant")
+                return "I apologize, but I can only create service requests for registered tenants. For property inquiries, please let me know your preferred location and flat type."
+
+            if not session.caller_data:
+                logger.error("❌ Service request failed: No tenant data available")
+                return "Unable to find the related flat with this phone number. Please email us at hello@kots.world from your registered email id."
+
+            # Extract arguments
+            ticket_category = function_args.get("ticket_category", "Other")
+            ticket_description = function_args.get("ticket_description", "Tenant reported an issue via voice assistant")
+
+            tenant_name = session.caller_data.get('name', 'Unknown')
+            booking_id = session.caller_data.get('tenant_id', '')
+
+            logger.info(f"🎫 Creating service request for tenant:")
+            logger.info(f"   Name: {tenant_name}")
+            logger.info(f"   Booking ID: {booking_id}")
+            logger.info(f"   Category: {ticket_category}")
+            logger.info(f"   Description: {ticket_description}")
+
+            # Save to service_webhook database
+            record_id = await save_to_service_webhook(
+                name=tenant_name,
+                phone=session.caller_number,
+                booking_id=booking_id,
+                ticket_category=ticket_category,
+                ticket_description=ticket_description,
+                channel="Voice Call"
+            )
+
+            # Also log to contact_logs
+            await save_to_contact_logs(
+                name=tenant_name,
+                phone=session.caller_number,
+                channel="Voice Call",
+                campaign_id=""
+            )
+
+            if record_id:
+                session.ticket_created = True
+                session.ticket_id = record_id
+                logger.info(f"✅ Service request saved! Record ID: {record_id}")
+                return f"We have raised your issue with the team. They will get back to you shortly. Thank you for reaching us. Happy to help if you have any further queries."
+            else:
+                logger.error("❌ Failed to save service request")
+                return "I apologize, but I'm having trouble creating the service request right now. Please email us at hello@kots.world"
+
+        else:
+            logger.error(f"❌ Unknown function: {function_name}")
+            return f"I encountered an error: unknown function {function_name}. Please try again."
+
     except Exception as e:
         logger.error(f"❌ Error executing function {function_name}: {e}", exc_info=True)
-        return f"I encountered an error while fetching the information. Please try again."
+        return f"I encountered an error while processing your request. Please try again."
 
 
 class AudioResampler:
@@ -563,13 +521,13 @@ class ExotelGeminiSession:
             tools = [Tool(function_declarations=function_declarations)]
 
             # Create config with system instruction and tools
-            # Temperature 0.3 for strict adherence with slight natural variation
+            # Temperature 0.1 for maximum accuracy when reading function responses
             config = LiveConnectConfig(
                 response_modalities=["AUDIO"],
                 system_instruction=system_prompt,  # System prompt
                 tools=tools,  # Enable function calling
                 generation_config={
-                    "temperature": 0.3,  # Low for strict guardrails with natural responses
+                    "temperature": 0.1,  # Very low - prioritize accuracy over creativity
                     "top_p": 0.8,
                     "top_k": 40
                 },
