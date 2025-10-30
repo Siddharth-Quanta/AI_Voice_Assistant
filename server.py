@@ -9,7 +9,6 @@ import base64
 import asyncio
 import logging
 import time
-import httpx
 from typing import Optional, Dict, Any
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -44,7 +43,8 @@ from prompts import (
 from database import (
     init_db_pool, close_db_pool, identify_caller, test_database_connection,
     save_to_sales_webhook, save_to_landlord_webhook,
-    save_to_service_webhook, save_to_contact_logs
+    save_to_service_webhook, save_to_contact_logs,
+    save_to_need_call_back_webhook
 )
 
 # Import ticket category matching
@@ -181,7 +181,7 @@ def _get_function_declarations():
         2. Preferred location
         3. Flat type preference (Studio, 1BHK, 2BHK, 3BHK)
 
-        The system will generate a landing page URL and send it via WhatsApp/SMS.""",
+        The system will save their details and team will follow up.""",
         parameters={
             "type": "object",
             "properties": {
@@ -251,34 +251,53 @@ def _get_function_declarations():
         }
     )
 
-    return [save_sales_lead_function, save_landlord_lead_function, save_tenant_service_function]
+    save_callback_request_function = FunctionDeclaration(
+        name="save_callback_request",
+        description="""Saves callback request when customer EXPLICITLY asks to speak with a human or requests a callback.
+        Use this when customer says:
+        - "I want someone to call me back"
+        - "Can someone from your team contact me?"
+        - "I need to speak with a human"
+        - "I want customer support to call me"
+
+        This creates PRIORITY callback ticket for urgent human interaction.
+
+        Collect:
+        1. callback_type: "Sales" (for property booking) or "Service" (for tenant issues)
+        2. For Sales: location and flat_type
+        3. For Service: issue_category and issue_description""",
+        parameters={
+            "type": "object",
+            "properties": {
+                "callback_type": {
+                    "type": "string",
+                    "description": "Type of callback: 'Sales' or 'Service'"
+                },
+                "location": {
+                    "type": "string",
+                    "description": "For Sales callbacks only: whitefield, hennur, marathahalli, bellandur, sarjapur, koramangala, hsr, or mahadevpura"
+                },
+                "flat_type": {
+                    "type": "string",
+                    "description": "For Sales callbacks only: studio, 1bhk, 2bhk, or 3bhk"
+                },
+                "issue_category": {
+                    "type": "string",
+                    "description": "For Service callbacks only: Plumbing, Electrical, Carpenter, Appliance, WiFi, Cleanliness, Security, Garbage, Parking, Check-in, Check-out, Housekeeping, Keys, Water, Callback, or Other"
+                },
+                "issue_description": {
+                    "type": "string",
+                    "description": "For Service callbacks only: Brief description of the issue"
+                }
+            },
+            "required": ["callback_type"]
+        }
+    )
+
+    return [save_sales_lead_function, save_landlord_lead_function, save_tenant_service_function, save_callback_request_function]
 
 
-def generate_landing_page_url(location: str, flat_type: str) -> str:
-    """
-    Generate landing page URL based on location and flat type
-
-    Args:
-        location: Location name (e.g., "whitefield", "hsr", "koramangala")
-        flat_type: Flat type (e.g., "1bhk", "2bhk", "3bhk", "studio")
-
-    Returns:
-        Full landing page URL
-    """
-    # Normalize location (lowercase, remove spaces)
-    location_normalized = location.lower().strip().replace(" ", "")
-
-    # Normalize flat_type (lowercase, ensure format is correct)
-    flat_type_normalized = flat_type.lower().strip().replace(" ", "")
-
-    # Ensure flat_type has hyphen format (1-bhk, 2-bhk, etc.)
-    if "bhk" in flat_type_normalized and "-" not in flat_type_normalized:
-        flat_type_normalized = flat_type_normalized.replace("bhk", "-bhk")
-
-    url = f"https://www.kots.world/bangalore/{location_normalized}/{flat_type_normalized}"
-
-    logger.info(f"🔗 Generated landing page URL: {url}")
-    return url
+# WhatsApp webhook and URL generation features removed - sales leads saved to database only
 
 
 async def execute_function_call(function_name: str, function_args: Dict[str, Any], session: Optional['ExotelGeminiSession'] = None) -> str:
@@ -312,34 +331,36 @@ async def execute_function_call(function_name: str, function_args: Dict[str, Any
             logger.info(f"   Location: {location}")
             logger.info(f"   Flat Type: {flat_type}")
 
-            # Generate landing page URL
-            landing_url = generate_landing_page_url(location, flat_type)
+            # Background task to save everything
+            async def save_sales_lead_background():
+                try:
+                    # Save to sales_webhook database
+                    record_id = await save_to_sales_webhook(
+                        name=name,
+                        phone=session.caller_number,
+                        location=location,
+                        flat_type=flat_type,
+                        channel="Voice Call",
+                        campaign_id=""
+                    )
+                    logger.info(f"✅ Sales lead saved! Record ID: {record_id}")
 
-            # Save to sales_webhook database
-            record_id = await save_to_sales_webhook(
-                name=name,
-                phone=session.caller_number,
-                location=location,
-                flat_type=flat_type,
-                channel="Voice Call",
-                campaign_id=""
-            )
+                    # Log to contact_logs
+                    await save_to_contact_logs(
+                        name=name,
+                        phone=session.caller_number,
+                        channel="Voice Call",
+                        campaign_id=""
+                    )
+                except Exception as e:
+                    logger.error(f"❌ Background save_sales_lead failed: {e}", exc_info=True)
 
-            # Also log to contact_logs
-            await save_to_contact_logs(
-                name=name,
-                phone=session.caller_number,
-                channel="Voice Call",
-                campaign_id=""
-            )
+            # Trigger background task
+            asyncio.create_task(save_sales_lead_background())
+            logger.info(f"🚀 Sales lead processing triggered in background")
 
-            if record_id:
-                logger.info(f"✅ Sales lead saved! Record ID: {record_id}, URL: {landing_url}")
-                # TODO: Send WhatsApp/SMS with landing_url
-                return "Thank you for giving us the details. We have shared the link to view the available flats over whatsapp and sms. You may click on the link and book it directly online."
-            else:
-                logger.error("❌ Failed to save sales lead")
-                return "Thank you for your interest! Our team will contact you shortly with property details."
+            # RESPOND IMMEDIATELY
+            return "Thank you for giving us the details. Our team will get back to you shortly with the property information."
 
         elif function_name == "save_landlord_lead":
             # Extract arguments
@@ -353,28 +374,34 @@ async def execute_function_call(function_name: str, function_args: Dict[str, Any
             logger.info(f"   Name: {name}")
             logger.info(f"   Phone: {session.caller_number}")
 
-            # Save to landlord_webhook database
-            record_id = await save_to_landlord_webhook(
-                name=name,
-                phone=session.caller_number,
-                channel="Voice Call",
-                campaign_id=""
-            )
+            # Background task to save everything
+            async def save_landlord_lead_background():
+                try:
+                    # Save to landlord_webhook database
+                    record_id = await save_to_landlord_webhook(
+                        name=name,
+                        phone=session.caller_number,
+                        channel="Voice Call",
+                        campaign_id=""
+                    )
+                    logger.info(f"✅ Landlord lead saved! Record ID: {record_id}")
 
-            # Also log to contact_logs
-            await save_to_contact_logs(
-                name=name,
-                phone=session.caller_number,
-                channel="Voice Call",
-                campaign_id=""
-            )
+                    # Log to contact_logs
+                    await save_to_contact_logs(
+                        name=name,
+                        phone=session.caller_number,
+                        channel="Voice Call",
+                        campaign_id=""
+                    )
+                except Exception as e:
+                    logger.error(f"❌ Background save_landlord_lead failed: {e}", exc_info=True)
 
-            if record_id:
-                logger.info(f"✅ Landlord lead saved! Record ID: {record_id}")
-                return "Thank you for showing interest with Kots. Our team will get back to you shortly."
-            else:
-                logger.error("❌ Failed to save landlord lead")
-                return "Thank you for your interest! Our team will contact you soon."
+            # Trigger background task
+            asyncio.create_task(save_landlord_lead_background())
+            logger.info(f"🚀 Landlord lead processing triggered in background")
+
+            # RESPOND IMMEDIATELY
+            return "Thank you for showing interest with Kots. Our team will get back to you shortly."
 
         elif function_name == "save_tenant_service":
             # Validate tenant status
@@ -399,32 +426,168 @@ async def execute_function_call(function_name: str, function_args: Dict[str, Any
             logger.info(f"   Category: {ticket_category}")
             logger.info(f"   Description: {ticket_description}")
 
-            # Save to service_webhook database
-            record_id = await save_to_service_webhook(
-                name=tenant_name,
-                phone=session.caller_number,
-                booking_id=booking_id,
-                ticket_category=ticket_category,
-                ticket_description=ticket_description,
-                channel="Voice Call"
-            )
+            # Background task to save everything
+            async def save_tenant_service_background():
+                try:
+                    # Save to service_webhook database
+                    record_id = await save_to_service_webhook(
+                        name=tenant_name,
+                        phone=session.caller_number,
+                        booking_id=booking_id,
+                        ticket_category=ticket_category,
+                        ticket_description=ticket_description,
+                        channel="Voice Call"
+                    )
+                    logger.info(f"✅ Service request saved! Record ID: {record_id}")
 
-            # Also log to contact_logs
-            await save_to_contact_logs(
-                name=tenant_name,
-                phone=session.caller_number,
-                channel="Voice Call",
-                campaign_id=""
-            )
+                    # Log to contact_logs
+                    await save_to_contact_logs(
+                        name=tenant_name,
+                        phone=session.caller_number,
+                        channel="Voice Call",
+                        campaign_id=""
+                    )
 
-            if record_id:
-                session.ticket_created = True
-                session.ticket_id = record_id
-                logger.info(f"✅ Service request saved! Record ID: {record_id}")
-                return f"We have raised your issue with the team. They will get back to you shortly. Thank you for reaching us. Happy to help if you have any further queries."
+                    # Update session
+                    if record_id:
+                        session.ticket_created = True
+                        session.ticket_id = record_id
+                except Exception as e:
+                    logger.error(f"❌ Background save_tenant_service failed: {e}", exc_info=True)
+
+            # Trigger background task
+            asyncio.create_task(save_tenant_service_background())
+            logger.info(f"🚀 Tenant service processing triggered in background")
+
+            # RESPOND IMMEDIATELY
+            return "We have raised your issue with the team. They will get back to you shortly. Thank you for reaching us. Happy to help if you have any further queries."
+
+        elif function_name == "save_callback_request":
+            # Handle callback request with DUAL INSERTION
+            callback_type = function_args.get("callback_type", "").strip()
+
+            if not session:
+                logger.error("❌ No session context for save_callback_request")
+                return "I'm having trouble processing your request. Please try again."
+
+            # Get caller info
+            caller_name = session.caller_data.get('name', 'Not provided') if session.caller_data else 'Not provided'
+
+            logger.info(f"📞 Processing callback request:")
+            logger.info(f"   Type: {callback_type}")
+            logger.info(f"   Name: {caller_name}")
+            logger.info(f"   Phone: {session.caller_number}")
+
+            # DUAL INSERTION based on callback_type
+            if callback_type.lower() == "sales":
+                # Extract sales-specific fields
+                location = function_args.get("location", "").lower().strip()
+                flat_type = function_args.get("flat_type", "").lower().strip()
+
+                logger.info(f"   Location: {location}")
+                logger.info(f"   Flat Type: {flat_type}")
+
+                # Background task for DUAL INSERTION (sales + callback webhooks)
+                async def save_sales_callback_background():
+                    try:
+                        # 1. Save to sales_webhook (regular flow)
+                        sales_record_id = await save_to_sales_webhook(
+                            name=caller_name,
+                            phone=session.caller_number,
+                            location=location,
+                            flat_type=flat_type,
+                            channel="Voice Call",
+                            campaign_id=""
+                        )
+                        logger.info(f"✅ Sales callback saved! Sales ID: {sales_record_id}")
+
+                        # 2. Save to need_call_back_webhook (priority)
+                        callback_record_id = await save_to_need_call_back_webhook(
+                            name=caller_name,
+                            phone=session.caller_number,
+                            callback_type="Sales",
+                            channel="Voice Call",
+                            location=location,
+                            flat_type=flat_type
+                        )
+                        logger.info(f"✅ Callback webhook saved! ID: {callback_record_id}")
+
+                        # 3. Log to contact_logs
+                        await save_to_contact_logs(
+                            name=caller_name,
+                            phone=session.caller_number,
+                            channel="Voice Call",
+                            campaign_id=""
+                        )
+                    except Exception as e:
+                        logger.error(f"❌ Background save_sales_callback failed: {e}", exc_info=True)
+
+                # Trigger background task
+                asyncio.create_task(save_sales_callback_background())
+                logger.info(f"🚀 Sales callback processing triggered in background")
+
+                # RESPOND IMMEDIATELY
+                return "We have successfully raised your call back request. Our sales team will contact you shortly to discuss the property details."
+
+            elif callback_type.lower() == "service":
+                # Extract service-specific fields
+                issue_category = function_args.get("issue_category", "Other")
+                issue_description = function_args.get("issue_description", "Customer requested callback for issue")
+
+                logger.info(f"   Issue Category: {issue_category}")
+                logger.info(f"   Issue Description: {issue_description}")
+
+                # Get booking_id if tenant
+                booking_id = ""
+                if session.caller_type == "tenant" and session.caller_data:
+                    booking_id = session.caller_data.get('tenant_id', '')
+
+                # Background task for DUAL INSERTION (service + callback webhooks)
+                async def save_service_callback_background():
+                    try:
+                        # 1. Save to service_webhook (regular flow)
+                        service_record_id = await save_to_service_webhook(
+                            name=caller_name,
+                            phone=session.caller_number,
+                            booking_id=booking_id,
+                            ticket_category=issue_category,
+                            ticket_description=issue_description,
+                            channel="Voice Call"
+                        )
+                        logger.info(f"✅ Service callback saved! Service ID: {service_record_id}")
+
+                        # 2. Save to need_call_back_webhook (priority)
+                        callback_record_id = await save_to_need_call_back_webhook(
+                            name=caller_name,
+                            phone=session.caller_number,
+                            callback_type="Service",
+                            channel="Voice Call",
+                            booking_id=booking_id,
+                            ticket_category=issue_category,
+                            ticket_description=issue_description
+                        )
+                        logger.info(f"✅ Callback webhook saved! ID: {callback_record_id}")
+
+                        # 3. Log to contact_logs
+                        await save_to_contact_logs(
+                            name=caller_name,
+                            phone=session.caller_number,
+                            channel="Voice Call",
+                            campaign_id=""
+                        )
+                    except Exception as e:
+                        logger.error(f"❌ Background save_service_callback failed: {e}", exc_info=True)
+
+                # Trigger background task
+                asyncio.create_task(save_service_callback_background())
+                logger.info(f"🚀 Service callback processing triggered in background")
+
+                # RESPOND IMMEDIATELY
+                return "We have successfully raised your call back request. Our support team will contact you shortly to resolve your issue."
+
             else:
-                logger.error("❌ Failed to save service request")
-                return "I apologize, but I'm having trouble creating the service request right now. Please email us at hello@kots.world"
+                logger.error(f"❌ Invalid callback_type: {callback_type}")
+                return "I'm having trouble understanding your request. Please let me know if you need help with booking a flat or a service issue."
 
         else:
             logger.error(f"❌ Unknown function: {function_name}")
@@ -548,11 +711,11 @@ class ExotelGeminiSession:
 
             logger.info(f"[{self.call_sid}] LiveConnectConfig created with INSTANT response mode (50ms silence, zero padding)")
 
-            # Configure speech settings
+            # Configure speech settings - Female voice (Zephyr)
             config.speech_config = SpeechConfig(
                 voice_config=VoiceConfig(
                     prebuilt_voice_config=PrebuiltVoiceConfig(
-                        voice_name="Charon"  # Clear voice that works well with Indian accent
+                        voice_name="Zephyr"  # Bright female voice for Indian English
                     )
                 ),
                 language_code="en-IN"  # Indian English for better accent recognition
@@ -933,28 +1096,45 @@ async def exotel_stream_handler(websocket: WebSocket):
             logger.info(f"🎙️ Call started: {call_sid}")
             logger.info(f"📞 Caller: {caller_number}")
 
-            # Identify caller type (tenant/lead/new_caller)
-            caller_info = await identify_caller(caller_number)
-            caller_type = caller_info.get("type")
-            caller_data = caller_info.get("data")
-
-            # Log caller identification
-            if caller_type == "tenant":
-                logger.info(f"👤 TENANT identified: {caller_data['name']} (ID: {caller_data['tenant_id']}, Flat: {caller_data['flat']})")
-            elif caller_type == "lead":
-                logger.info(f"👤 LEAD identified: {caller_data['name']} (ID: {caller_data['lead_id']})")
-            else:
-                logger.info(f"👤 NEW CALLER identified: {caller_number}")
-
-            # Create and start Gemini session
+            # 🚀 OPTIMIZATION: Start Gemini session IMMEDIATELY without waiting for DB lookup
+            # Use new_caller prompt for everyone initially - fastest response time
             session = ExotelGeminiSession(call_sid, websocket)
             session.caller_number = caller_number
-            session.caller_type = caller_type
-            session.caller_data = caller_data
+            session.caller_type = "new_caller"  # Default to new_caller for instant response
+            session.caller_data = None
             active_sessions[call_sid] = session
 
-            # Start Gemini task
+            logger.info(f"⚡ Starting Gemini session immediately (before DB lookup)")
+
+            # Start Gemini task immediately - don't wait!
             gemini_task = asyncio.create_task(session.start())
+
+            # 🔄 Run caller identification in BACKGROUND (parallel, non-blocking)
+            async def identify_and_update():
+                try:
+                    logger.info(f"🔍 Background: Identifying caller {caller_number}...")
+                    caller_info = await identify_caller(caller_number)
+                    caller_type = caller_info.get("type")
+                    caller_data = caller_info.get("data")
+
+                    # Log caller identification
+                    if caller_type == "tenant":
+                        logger.info(f"👤 TENANT identified: {caller_data['name']} (ID: {caller_data['tenant_id']}, Flat: {caller_data['flat']})")
+                    elif caller_type == "lead":
+                        logger.info(f"👤 LEAD identified: {caller_data['name']} (ID: {caller_data['lead_id']})")
+                    else:
+                        logger.info(f"👤 NEW CALLER confirmed: {caller_number}")
+
+                    # Update session with caller info (for future responses if needed)
+                    session.caller_type = caller_type
+                    session.caller_data = caller_data
+                    logger.info(f"✅ Session updated with caller info")
+                except Exception as e:
+                    logger.error(f"❌ Background caller identification failed: {e}")
+                    # Continue with new_caller prompt - no problem!
+
+            # Fire and forget - don't wait for this!
+            asyncio.create_task(identify_and_update())
 
             # Process incoming messages from Exotel
             while session.is_active:

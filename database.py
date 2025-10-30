@@ -454,6 +454,96 @@ async def save_to_contact_logs(
         return None
 
 
+async def save_to_need_call_back_webhook(
+    name: str,
+    phone: str,
+    callback_type: str,  # "Sales" or "Service"
+    channel: str = "Voice Call",
+    # Sales-specific fields
+    location: str = None,
+    flat_type: str = None,
+    # Service-specific fields
+    booking_id: str = "",
+    ticket_category: str = None,
+    ticket_description: str = None,
+    call_transcript: str = None
+) -> Optional[int]:
+    """
+    Save callback request to need_call_back_webhook table
+    This is for users who explicitly request to speak with a human
+
+    Args:
+        name: Customer name
+        phone: Phone number
+        callback_type: "Sales" or "Service"
+        channel: Channel source (default: "Voice Call")
+        location: For Sales - preferred location
+        flat_type: For Sales - flat type preference
+        booking_id: For Service - tenant booking ID
+        ticket_category: For Service - issue category
+        ticket_description: For Service - issue description
+        call_transcript: Optional call transcript
+
+    Returns:
+        record_id (int) if successful, None if failed
+    """
+    if not db_pool:
+        logger.error("Database pool not initialized")
+        return None
+
+    try:
+        async with db_pool.acquire() as conn:
+            insert_query = """
+                INSERT INTO need_call_back_webhook (
+                    name,
+                    phone,
+                    channel,
+                    call_type,
+                    location,
+                    flat_type,
+                    booking_id,
+                    ticket_category,
+                    ticket_description,
+                    call_transcript
+                ) VALUES (
+                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
+                )
+                RETURNING id
+            """
+
+            record_id = await conn.fetchval(
+                insert_query,
+                name,
+                phone,
+                channel,
+                callback_type,
+                location,
+                flat_type,
+                booking_id,
+                ticket_category,
+                ticket_description,
+                call_transcript
+            )
+
+            logger.info(f"✅ Callback request saved to need_call_back_webhook! ID: {record_id}")
+            logger.info(f"   Name: {name}")
+            logger.info(f"   Phone: {phone}")
+            logger.info(f"   Type: {callback_type}")
+            if callback_type == "Sales":
+                logger.info(f"   Location: {location}")
+                logger.info(f"   Flat Type: {flat_type}")
+            else:
+                logger.info(f"   Booking ID: {booking_id}")
+                logger.info(f"   Ticket Category: {ticket_category}")
+                logger.info(f"   Ticket Description: {ticket_description}")
+
+            return record_id
+
+    except Exception as e:
+        logger.error(f"❌ Error saving to need_call_back_webhook: {e}", exc_info=True)
+        return None
+
+
 async def test_database_connection():
     """Test database connection and queries"""
     try:
